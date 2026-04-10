@@ -257,7 +257,7 @@ std::string LlmPlanner::build_gbnf_grammar(
   g += "plan   ::= step (\"\\n\" step)*\n";
   // step: <float>: (<action>)  [<float>]
   g += "step   ::= number \": (\" action \")  [\" number \"]\"\n";
-  g += "number ::= [0-9]+ (\".\" [0-9]+)?\n";
+  g += "number ::= [0-9]+ (\".\" [0-9]{3})?\n";
   g += "\n";
 
   // action rule: union of all valid action rules
@@ -339,7 +339,7 @@ std::string LlmPlanner::generate_plan(const std::string domain_path,
   // ── 3. First LLM call: generate plan ─────────────────────────────────────
   std::string system_prompt_planning =
       "You are a PDDL planning expert. Generate a sequence of actions to solve "
-      "the problem, ordering them logically.";
+      "the problem, ordering them logically. Use the less actions as possible.";
 
   std::string plan_prompt = "Domain:\n" + domain_str + "\n\nProblem:\n" +
                             problem_str +
