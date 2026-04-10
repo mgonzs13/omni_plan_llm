@@ -36,7 +36,7 @@ LlmPlanner::LlmPlanner() : omni_plan::Planner() {
   this->add_ros_parameters(
       {{"llm_action_name", std::string("/llama/generate_chat_completions"),
         this->llm_action_name_},
-       {"temperature", 0.0f, this->temperature_},
+       {"temperature", 0.2f, this->temperature_},
        {"server_timeout", 30, this->server_timeout_}});
 }
 
@@ -203,15 +203,14 @@ std::string LlmPlanner::build_gbnf_grammar(
         &objects_by_type) const {
 
   // Sanitise a name for use as a GBNF rule identifier
-  // (replace characters that are not alphanumeric, '-', or '_' with '-')
+  // (keep only alphanumeric and '-', replace underscores and other chars with
+  // '-')
   auto sanitise = [](const std::string &s) -> std::string {
     std::string result;
     result.reserve(s.size());
     for (char c : s) {
       result +=
-          (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
-              ? c
-              : '-';
+          (std::isalnum(static_cast<unsigned char>(c)) || c == '-') ? c : '-';
     }
     return result;
   };
@@ -266,7 +265,7 @@ std::string LlmPlanner::build_gbnf_grammar(
   for (size_t i = 0; i < valid_actions.size(); ++i) {
     g += "action-" + sanitise(valid_actions[i]->name);
     if (i < valid_actions.size() - 1) {
-      g += "\n       | ";
+      g += " | ";
     }
   }
   g += "\n";
@@ -337,70 +336,53 @@ std::string LlmPlanner::generate_plan(const std::string domain_path,
   RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"), "GBNF grammar:\n%s",
               grammar.c_str());
 
-  // ── 3. First LLM call: reasoning ──────────────────────────────────────────
-  std::string system_prompt_reasoning =
-      "You are an expert in automated planning and PDDL (Planning Domain "
-      "Definition Language). "
-      "Your task is to analyze a PDDL domain and problem, then provide a "
-      "clear, step-by-step "
-      "reasoning about how to achieve the goals. Think through the state "
-      "transformations and "
-      "action sequences carefully.";
-
-  std::string reasoning_prompt =
-      "Analyze the following PDDL domain and problem:\n\n"
-      "PDDL Domain:\n" +
-      domain_str + "\n\nPDDL Problem:\n" + problem_str +
-      "\n\nProvide your reasoning about how to solve this planning problem:\n"
-      "1. What are the key actions and their effects?\n"
-      "2. What is the current state and what are the goals?\n"
-      "3. What sequence of actions would transform the initial state into the "
-      "goal state?\n\n"
-      "Think step by step:";
-
-  RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
-              "LLM planning — step 1: reasoning");
-  const std::string reasoning =
-      this->call_llm(reasoning_prompt, system_prompt_reasoning, "");
-
-  if (reasoning.empty()) {
-    RCLCPP_WARN(rclcpp::get_logger("LlmPlanner"),
-                "LLM reasoning call returned an empty response");
-  } else {
-    RCLCPP_DEBUG(rclcpp::get_logger("LlmPlanner"), "Reasoning:\n%s",
-                 reasoning.c_str());
-  }
-
-  // ── 4. Second LLM call: constrained plan generation ───────────────────────
+  // ── 3. First LLM call: generate plan ─────────────────────────────────────
   std::string system_prompt_planning =
-      "You are a PDDL plan generator that produces strictly formatted temporal "
-      "plans. "
-      "Your output must be valid PDDL temporal plan syntax with no additional "
-      "text or explanation. "
-      "Each action must be on its own line following the exact format: "
-      "<start_time>: (<action> <parameters>) [<duration>]";
+      "You are a PDDL planning expert. Generate a sequence of actions to solve "
+      "the problem, ordering them logically.";
 
-  std::string plan_prompt =
-      "Based on the reasoning provided, generate a valid PDDL temporal plan "
-      "for the problem. "
-      "Output ONLY the plan lines in the correct format, one per line. "
-      "Do not include any explanation, comments, or additional text:\n\n"
-      "PDDL Plan:";
+  std::string plan_prompt = "Domain:\n" + domain_str + "\n\nProblem:\n" +
+                            problem_str +
+                            "\n\nGenerate an ordered sequence of actions to "
+                            "solve this problem.";
 
   RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
-              "LLM planning — step 2: plan generation (GBNF constrained)");
+              "LLM planning — step 1: plan generation");
   const std::string plan =
-      this->call_llm(plan_prompt, system_prompt_planning, grammar);
+      this->call_llm(plan_prompt, system_prompt_planning, "");
 
   if (plan.empty()) {
     RCLCPP_WARN(rclcpp::get_logger("LlmPlanner"),
-                "LLM plan-generation call returned an empty response");
+                "LLM plan call returned an empty response");
+    return "";
+  }
+  RCLCPP_DEBUG(rclcpp::get_logger("LlmPlanner"), "Generated plan:\n%s",
+               plan.c_str());
+
+  // ── 4. Second LLM call: format as PDDL temporal plan ──────────────────────
+  std::string system_prompt_format =
+      "Convert the action sequence into PDDL temporal plan format. Each line "
+      "must be: <time>: (<action> <params>) [<duration>]";
+
+  std::string format_prompt = "Action sequence:\n" + plan +
+                              "\n\nConvert this to PDDL temporal plan format, "
+                              "one action per line, with "
+                              "no explanation.";
+
+  RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
+              "LLM planning — step 2: PDDL format conversion");
+  const std::string pddl_plan =
+      this->call_llm(format_prompt, system_prompt_format, grammar);
+
+  if (pddl_plan.empty()) {
+    RCLCPP_WARN(rclcpp::get_logger("LlmPlanner"),
+                "LLM format conversion returned an empty response");
   } else {
-    RCLCPP_DEBUG(rclcpp::get_logger("LlmPlanner"), "Raw LLM plan:\n%s",
-                 plan.c_str());
+    RCLCPP_DEBUG(rclcpp::get_logger("LlmPlanner"), "PDDL plan:\n%s",
+                 pddl_plan.c_str());
   }
 
-  return plan;
+  return pddl_plan;
 }
 
 bool LlmPlanner::has_solution(const std::string &plan_output) const {
