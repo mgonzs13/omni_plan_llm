@@ -1,0 +1,7 @@
+<class_libraries>
+    <library path="llm_planner">
+        <class name="omni_plan_llm/LlmPlanner" type="omni_plan_llm::LlmPlanner" base_class_type="omni_plan::Planner">
+            <description>LLM-based planner for omni_plan using llama_ros. Performs a reasoning call followed by a GBNF-constrained plan-generation call.</description>
+        </class>
+    </library>
+</class_libraries>
