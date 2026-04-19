@@ -63,12 +63,15 @@ public:
    * constructs a GBNF grammar from the declared actions and objects, then
    * performs two sequential LLM calls: one for reasoning and one for
    * constrained plan generation.
-   * @param domain_path File path to the PDDL domain.
-   * @param problem_path File path to the PDDL problem.
-   * @return A string containing the raw planner output (the generated plan).
+   * @param domain The PDDL domain.
+   * @param problem The PDDL problem.
+   * @return A PDDL plan.
    */
-  std::string generate_plan(const std::string domain_path,
-                            const std::string problem_path) const override;
+  omni_plan::pddl::Plan generate_plan(
+      const omni_plan::pddl::Domain &domain,
+      const omni_plan::pddl::Problem &problem,
+      std::unordered_map<std::string, std::shared_ptr<omni_plan::pddl::Action>>
+          actions) const override;
 
   using omni_plan::Planner::generate_plan;
 
@@ -128,19 +131,19 @@ private:
 
   /**
    * @brief Parses the (:durative-action …) blocks from a PDDL domain string.
-   * @param domain_str The full contents of the PDDL domain file.
+   * @param domain The PDDL domain.
    * @return A vector of ActionInfo structs, one per action.
    */
   std::vector<ActionInfo>
-  parse_domain_actions(const std::string &domain_str) const;
+  parse_domain_actions(const omni_plan::pddl::Domain &domain) const;
 
   /**
    * @brief Parses the (:objects …) section from a PDDL problem string.
-   * @param problem_str The full contents of the PDDL problem file.
+   * @param problem The PDDL problem.
    * @return A map from type name to the list of object names of that type.
    */
   std::unordered_map<std::string, std::vector<std::string>>
-  parse_problem_objects(const std::string &problem_str) const;
+  parse_problem_objects(const omni_plan::pddl::Problem &problem) const;
 
   /**
    * @brief Builds a GBNF grammar that constrains the LLM to produce valid

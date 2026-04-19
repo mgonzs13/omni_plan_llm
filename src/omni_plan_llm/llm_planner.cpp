@@ -133,33 +133,15 @@ std::string LlmPlanner::call_llm(const std::string &prompt,
 }
 
 std::vector<LlmPlanner::ActionInfo>
-LlmPlanner::parse_domain_actions(const std::string &domain_str) const {
+LlmPlanner::parse_domain_actions(const omni_plan::pddl::Domain &domain) const {
   std::vector<ActionInfo> actions;
 
-  // Match (:durative-action NAME … :parameters (…) …)
-  // We iterate over all occurrences of ":durative-action"
-  std::regex action_block_re(
-      R"(\(:durative-action\s+([\w-]+)[\s\S]*?:parameters\s*\(([^)]*)\))",
-      std::regex::icase);
-
-  auto begin = std::sregex_iterator(domain_str.begin(), domain_str.end(),
-                                    action_block_re);
-  auto end = std::sregex_iterator();
-
-  for (auto it = begin; it != end; ++it) {
-    const std::smatch &match = *it;
+  for (const auto &action : domain.get_actions()) {
     ActionInfo info;
-    info.name = match[1].str();
+    info.name = action->get_name();
 
-    // Parse parameter pairs: ?name - type
-    std::string params_str = match[2].str();
-    std::regex param_re(R"(\?\s*([\w-]+)\s+-\s+([\w-]+))");
-    auto pb =
-        std::sregex_iterator(params_str.begin(), params_str.end(), param_re);
-    auto pe = std::sregex_iterator();
-    for (auto pi = pb; pi != pe; ++pi) {
-      const std::smatch &pm = *pi;
-      info.params.emplace_back(pm[1].str(), pm[2].str());
+    for (const auto &param : action->get_parameters()) {
+      info.params.emplace_back(param.get_name(), param.get_type());
     }
 
     actions.push_back(std::move(info));
@@ -169,29 +151,12 @@ LlmPlanner::parse_domain_actions(const std::string &domain_str) const {
 }
 
 std::unordered_map<std::string, std::vector<std::string>>
-LlmPlanner::parse_problem_objects(const std::string &problem_str) const {
+LlmPlanner::parse_problem_objects(
+    const omni_plan::pddl::Problem &problem) const {
   std::unordered_map<std::string, std::vector<std::string>> objects_by_type;
 
-  // Extract the content of (:objects … )
-  std::regex objects_block_re(R"(\(:objects([\s\S]*?)\))", std::regex::icase);
-  std::smatch block_match;
-  if (!std::regex_search(problem_str, block_match, objects_block_re)) {
-    return objects_by_type;
-  }
-
-  std::string objects_str = block_match[1].str();
-
-  // Each line: name - type  (multiple names per type on one line are supported
-  // by the omni_plan format which places one object per line)
-  std::regex obj_re(R"(\b([\w-]+)\s+-\s+([\w-]+))");
-  auto ob =
-      std::sregex_iterator(objects_str.begin(), objects_str.end(), obj_re);
-  auto oe = std::sregex_iterator();
-  for (auto oi = ob; oi != oe; ++oi) {
-    const std::smatch &om = *oi;
-    const std::string &obj_name = om[1].str();
-    const std::string &type_name = om[2].str();
-    objects_by_type[type_name].push_back(obj_name);
+  for (const auto &obj : problem.get_objects()) {
+    objects_by_type[obj.get_type()].push_back(obj.get_name());
   }
 
   return objects_by_type;
@@ -296,70 +261,60 @@ std::string LlmPlanner::build_gbnf_grammar(
   return g;
 }
 
-std::string LlmPlanner::generate_plan(const std::string domain_path,
-                                      const std::string problem_path) const {
+omni_plan::pddl::Plan LlmPlanner::generate_plan(
+    const omni_plan::pddl::Domain &domain,
+    const omni_plan::pddl::Problem &problem,
+    std::unordered_map<std::string, std::shared_ptr<omni_plan::pddl::Action>>
+        actions) const {
 
-  // ── 1. Read domain and problem files ──────────────────────────────────────
-  auto read_file = [](const std::string &path) -> std::string {
-    std::ifstream f(path);
-    if (!f.is_open()) {
-      return "";
-    }
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-  };
+  omni_plan::pddl::Plan pddl_plan;
 
-  const std::string domain_str = read_file(domain_path);
-  const std::string problem_str = read_file(problem_path);
+  // ── 1. Build GBNF grammar from parsed actions and objects ─────────────────
+  RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
+              "LLM planning — step 1: GBNF grammar construction from domain "
+              "and problem");
 
-  if (domain_str.empty() || problem_str.empty()) {
-    RCLCPP_ERROR(rclcpp::get_logger("LlmPlanner"),
-                 "Failed to read domain ('%s') or problem ('%s') file",
-                 domain_path.c_str(), problem_path.c_str());
-    return "";
-  }
-
-  // ── 2. Build GBNF grammar from parsed actions and objects ─────────────────
-  const auto actions = this->parse_domain_actions(domain_str);
-  const auto objects_by_type = this->parse_problem_objects(problem_str);
-  const std::string grammar =
-      this->build_gbnf_grammar(actions, objects_by_type);
+  auto parsed_actions = this->parse_domain_actions(domain);
+  auto objects_by_type = this->parse_problem_objects(problem);
+  std::string grammar =
+      this->build_gbnf_grammar(parsed_actions, objects_by_type);
 
   if (grammar.empty()) {
     RCLCPP_ERROR(rclcpp::get_logger("LlmPlanner"),
                  "Could not build a valid GBNF grammar for the current "
                  "domain/problem; aborting LLM planning");
-    return "";
+    return pddl_plan; // empty plan
   }
 
   RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"), "GBNF grammar:\n%s",
               grammar.c_str());
 
-  // ── 3. First LLM call: generate plan ─────────────────────────────────────
+  // ── 2. First LLM call: generate plan ─────────────────────────────────────
   std::string system_prompt_planning =
       "You are a PDDL planning expert. Generate a sequence of actions to solve "
       "the problem, ordering them logically. Use the less actions as possible.";
 
-  std::string plan_prompt = "Domain:\n" + domain_str + "\n\nProblem:\n" +
-                            problem_str +
+  std::string plan_prompt = "Domain:\n" + domain.to_pddl() + "\n\nProblem:\n" +
+                            problem.to_pddl() +
                             "\n\nGenerate an ordered sequence of actions to "
                             "solve this problem.";
 
   RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
-              "LLM planning — step 1: plan generation");
+              "LLM planning — step 2: plan generation");
+
   const std::string plan =
       this->call_llm(plan_prompt, system_prompt_planning, "");
 
   if (plan.empty()) {
     RCLCPP_WARN(rclcpp::get_logger("LlmPlanner"),
                 "LLM plan call returned an empty response");
-    return "";
+    return pddl_plan; // empty plan
   }
+
   RCLCPP_DEBUG(rclcpp::get_logger("LlmPlanner"), "Generated plan:\n%s",
                plan.c_str());
 
-  // ── 4. Second LLM call: format as PDDL temporal plan ──────────────────────
+  // ── 3. Second LLM call: format as PDDL temporal plan ──────────────────────
   std::string system_prompt_format =
       "Convert the action sequence into PDDL temporal plan format. Each line "
       "must be: <time>: (<action> <params>) [<duration>]";
@@ -370,16 +325,39 @@ std::string LlmPlanner::generate_plan(const std::string domain_path,
                               "no explanation.";
 
   RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
-              "LLM planning — step 2: PDDL format conversion");
-  const std::string pddl_plan =
+              "LLM planning — step 3: PDDL format conversion");
+  const std::string string_plan =
       this->call_llm(format_prompt, system_prompt_format, grammar);
 
-  if (pddl_plan.empty()) {
+  if (string_plan.empty()) {
     RCLCPP_WARN(rclcpp::get_logger("LlmPlanner"),
                 "LLM format conversion returned an empty response");
   } else {
     RCLCPP_DEBUG(rclcpp::get_logger("LlmPlanner"), "PDDL plan:\n%s",
-                 pddl_plan.c_str());
+                 string_plan.c_str());
+  }
+
+  // ── 4. Check if the plan has solution and parse it ────────────────────────
+  RCLCPP_INFO(rclcpp::get_logger("LlmPlanner"),
+              "LLM planning — step 4: Solution validation and parsing");
+
+  pddl_plan.set_raw_output(string_plan);
+  pddl_plan.set_has_solution(this->has_solution(string_plan));
+
+  if (!pddl_plan.has_solution()) {
+    return pddl_plan; // empty plan with has_solution=false
+  }
+
+  std::vector<std::string> lines = this->get_lines_with_actions(string_plan);
+  for (const auto &line : lines) {
+    auto [action_name, parameters] = this->parse_action_line(line);
+    if (action_name.empty() || actions.count(action_name) == 0) {
+      continue;
+    }
+    float start_time = this->parse_start_time(line);
+    float duration = this->parse_duration(line);
+    pddl_plan.add_action(actions.at(action_name), parameters, start_time,
+                         duration);
   }
 
   return pddl_plan;
