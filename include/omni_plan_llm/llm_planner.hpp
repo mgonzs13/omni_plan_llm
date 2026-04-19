@@ -67,11 +67,9 @@ public:
    * @param problem The PDDL problem.
    * @return A PDDL plan.
    */
-  omni_plan::pddl::Plan generate_plan(
-      const omni_plan::pddl::Domain &domain,
-      const omni_plan::pddl::Problem &problem,
-      std::unordered_map<std::string, std::shared_ptr<omni_plan::pddl::Action>>
-          actions) const override;
+  omni_plan::pddl::Plan
+  generate_plan(const omni_plan::pddl::Domain &domain,
+                const omni_plan::pddl::Problem &problem) const override;
 
   using omni_plan::Planner::generate_plan;
 

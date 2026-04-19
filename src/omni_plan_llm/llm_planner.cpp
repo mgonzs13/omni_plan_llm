@@ -136,11 +136,11 @@ std::vector<LlmPlanner::ActionInfo>
 LlmPlanner::parse_domain_actions(const omni_plan::pddl::Domain &domain) const {
   std::vector<ActionInfo> actions;
 
-  for (const auto &action : domain.get_actions()) {
+  for (const auto &pair : domain.get_actions()) {
     ActionInfo info;
-    info.name = action->get_name();
+    info.name = pair.second->get_name();
 
-    for (const auto &param : action->get_parameters()) {
+    for (const auto &param : pair.second->get_parameters()) {
       info.params.emplace_back(param.get_name(), param.get_type());
     }
 
@@ -261,11 +261,9 @@ std::string LlmPlanner::build_gbnf_grammar(
   return g;
 }
 
-omni_plan::pddl::Plan LlmPlanner::generate_plan(
-    const omni_plan::pddl::Domain &domain,
-    const omni_plan::pddl::Problem &problem,
-    std::unordered_map<std::string, std::shared_ptr<omni_plan::pddl::Action>>
-        actions) const {
+omni_plan::pddl::Plan
+LlmPlanner::generate_plan(const omni_plan::pddl::Domain &domain,
+                          const omni_plan::pddl::Problem &problem) const {
 
   omni_plan::pddl::Plan pddl_plan;
 
@@ -349,6 +347,8 @@ omni_plan::pddl::Plan LlmPlanner::generate_plan(
   }
 
   std::vector<std::string> lines = this->get_lines_with_actions(string_plan);
+  const auto &actions = domain.get_actions();
+
   for (const auto &line : lines) {
     auto [action_name, parameters] = this->parse_action_line(line);
     if (action_name.empty() || actions.count(action_name) == 0) {
